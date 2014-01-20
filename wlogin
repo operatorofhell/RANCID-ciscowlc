@@ -1,347 +1,730 @@
-#! /usr/bin/perl
+
+#! /usr/bin/expect --
 ##
-## Copyright (C) 1997-2004 by Terrapin Communications, Inc.
+## $Id: clogin.in 2162 2010-03-15 21:20:31Z heas $
+##
+## rancid 2.3.3
+## Copyright (c) 1997-2009 by Terrapin Communications, Inc.
 ## All rights reserved.
 ##
-## This software may be freely copied, modified and redistributed
-## without fee for non-commerical purposes provided that this license
-## remains intact and unmodified with any RANCID distribution.
+## This code is derived from software contributed to and maintained by
+## Terrapin Communications, Inc. by Henry Kilmer, John Heasley, Andrew Partan,
+## Pete Whiting, Austin Schutz, and Andrew Fort.
 ##
-## There is no warranty or other guarantee of fitness of this software.
-## It is provided solely "as is".  The author(s) disclaim(s) all
-## responsibility and liability with respect to this software's usage
-## or its effect upon hardware, computer systems, other software, or
-## anything else.
+## Redistribution and use in source and binary forms, with or without
+## modification, are permitted provided that the following conditions
+## are met:
+## 1. Redistributions of source code must retain the above copyright
+##    notice, this list of conditions and the following disclaimer.
+## 2. Redistributions in binary form must reproduce the above copyright
+##    notice, this list of conditions and the following disclaimer in the
+##    documentation and/or other materials provided with the distribution.
+## 3. All advertising materials mentioning features or use of this software
+##    must display the following acknowledgement:
+##        This product includes software developed by Terrapin Communications,
+##        Inc. and its contributors for RANCID.
+## 4. Neither the name of Terrapin Communications, Inc. nor the names of its
+##    contributors may be used to endorse or promote products derived from
+##    this software without specific prior written permission.
+## 5. It is requested that non-binding fixes and modifications be contributed
+##    back to Terrapin Communications, Inc.
 ##
-## Except where noted otherwise, rancid was written by and is maintained by
-## Henry Kilmer, John Heasley, Andrew Partan, Pete Whiting, and Austin Schutz.
-##
+## THIS SOFTWARE IS PROVIDED BY Terrapin Communications, INC. AND CONTRIBUTORS
+## ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+## TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+## PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COMPANY OR CONTRIBUTORS
+## BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+## CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+## SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+## INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+## CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+## ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+## POSSIBILITY OF SUCH DAMAGE.
+# 
+#  The expect login scripts were based on Erik Sherk's gwtn, by permission.
+# 
+# wlogin - Cisco Wireless Controller login
 #
 #
-# Modified from ciscoips by Josh Yost 
-# Created on 4/16/2008 
-#
-#  This is meant to try handle Cisco's WLCs V4.X and on
-#
-#  RANCID - Really Awesome New Cisco confIg Differ
-#
-# usage: ciscowlc [-d] [-l] [-f filename] [-r rawfile | $host]
-use Getopt::Std;
-getopts('df:lr:');
-$log = $opt_l;
-$debug = $opt_d;
-$file = $opt_f;
-$rawfile = $opt_r;
-$host = $ARGV[0];
-$clean_run = 0;
-$found_end = 0;
-$timeo = 90;				# wlogin timeout in seconds
 
-my(@commandtable, %commands, @commands);# command lists
-my(%filter_pwds);			# password filtering mode
+# Usage line
+set usage "Usage: $argv0 \[-dSV\] \[-c command\] \
+\[-Evar=x\] \[-f cloginrc-file\] \[-p user-password\] \
+\[-s script-file\] \[-t timeout\] \[-u username\] \
+\[-v vty-password\] \[-x command-file\] \
+\[-y ssh_cypher_type\] router \[router...\]\n"
 
-# This routine is used to print out the router configuration
-sub ProcessHistory {
+# env(CLOGIN) may contain:
+#	x == do not set xterm banner or name
 
-    my($new_hist_tag,$new_command,$command_string, at string) = (@_);
-    if ((($new_hist_tag ne $hist_tag) || ($new_command ne $command))
-	&& defined %history) {
-	print eval "$command \%history";
-	undef %history;
+# Password file
+set password_file $env(HOME)/.cloginrc
+# Default is to login to the router
+set do_command 0
+set do_script 0
+# The default is to look in the password file to find the passwords.  This
+# tracks if we receive them on the command line.
+set do_passwd 1
+# Save config, if prompted
+set do_saveconfig 0
+# Sometimes routers take awhile to answer (the default is 10 sec)
+set timeoutdflt 45
+#
+set send_human {.4 .4 .7 .3 5}
+# new option to provide "login" command capabilities
+set loginonly 0
+
+# Find the user in the ENV, or use the unix userid.
+if {[ info exists env(CISCO_USER) ]} {
+    set default_user $env(CISCO_USER)
+} elseif {[ info exists env(USER) ]} {
+    set default_user $env(USER)
+} elseif {[ info exists env(LOGNAME) ]} {
+    set default_user $env(LOGNAME)
+} else {
+    # This uses "id" which I think is portable.  At least it has existed
+    # (without options) on all machines/OSes I've been on recently -
+    # unlike whoami or id -nu.
+    if [ catch {exec id} reason ] {
+	send_error "\nError: could not exec id: $reason\n"
+	exit 1
     }
-    if (($new_hist_tag) && ($new_command) && ($command_string)) {
-	if ($history{$command_string}) {
-	    $history{$command_string} = "$history{$command_string}@string";
-	} else {
-	    $history{$command_string} = "@string";
+    regexp {\(([^)]*)} "$reason" junk default_user
+}
+if {[ info exists env(CLOGINRC) ]} {
+    set password_file $env(CLOGINRC)
+}
+
+# Process the command line
+for {set i 0} {$i < $argc} {incr i} {
+    set arg [lindex $argv $i]
+
+    switch  -glob -- $arg {
+	# Expect debug mode
+	-d* {
+	    exp_internal 1
+	# Username
+	} -u* {
+	    if {! [regexp .\[uU\](.+) $arg ignore user]} {
+		incr i
+		set username [ lindex $argv $i ]
+	    }
+	# VTY Password
+	} -p* {
+	    if {! [regexp .\[pP\](.+) $arg ignore userpasswd]} {
+		incr i
+		set userpasswd [ lindex $argv $i ]
+	    }
+	    set do_passwd 0
+	# VTY Password
+	} -v* {
+	    if {! [regexp .\[vV\](.+) $arg ignore passwd]} {
+		incr i
+		set passwd [ lindex $argv $i ]
+	    }
+	    set do_passwd 0
+	# Version string
+	} -V* {
+	    send_user "rancid 2.3.3\n"
+	    exit 0
+	# Environment variable to pass to -s scripts
+	} -E* {
+	    if {[regexp .\[E\](.+)=(.+) $arg ignore varname varvalue]} {
+		set E$varname $varvalue
+	    } else {
+		send_user "\nError: invalid format for -E in $arg\n"
+		exit 1
+	    }
+	# Command to run.
+	} -c* {
+	    if {! [regexp .\[cC\](.+) $arg ignore command]} {
+		incr i
+		set command [ lindex $argv $i ]
+	    }
+	    set do_command 1
+	# Expect script to run.
+	} -s* {
+	    if {! [regexp .\[sS\](.+) $arg ignore sfile]} {
+		incr i
+		set sfile [ lindex $argv $i ]
+	    }
+	    if { ! [ file readable $sfile ] } {
+		send_user "\nError: Can't read $sfile\n"
+		exit 1
+	    }
+	    set do_script 1
+	# save config on exit
+	} -S* {
+	    set do_saveconfig 1
+	# 'ssh -c' cypher type
+	} -y* {
+	    if {! [regexp .\[eE\](.+) $arg ignore cypher]} {
+		incr i
+		set cypher [ lindex $argv $i ]
+	    }
+	# alternate cloginrc file
+	} -f* {
+	    if {! [regexp .\[fF\](.+) $arg ignore password_file]} {
+		incr i
+		set password_file [ lindex $argv $i ]
+	    }
+	# Timeout
+	} -t* {
+	    if {! [regexp .\[tT\](.+) $arg ignore timeout]} {
+		incr i
+	        set timeoutdflt [ lindex $argv $i ]
+	    }
+	# Command file
+	} -x* {
+	    if {! [regexp .\[xX\](.+) $arg ignore cmd_file]} {
+		incr i
+		set cmd_file [ lindex $argv $i ]
+	    }
+	    if [ catch {set cmd_fd [open $cmd_file r]} reason ] {
+		send_user "\nError: $reason\n"
+		exit 1
+	    }
+	    set cmd_text [read $cmd_fd]
+	    close $cmd_fd
+	    set command [join [split $cmd_text \n] \;]
+	    set do_command 1
+	} -* {
+	    send_user "\nError: Unknown argument! $arg\n"
+	    send_user $usage
+	    exit 1
+	} default {
+	    break
 	}
-    } elsif (($new_hist_tag) && ($new_command)) {
-	$history{++$#history} = "@string";
-    } else {
-	print "@string";
     }
-    $hist_tag = $new_hist_tag;
-    $command = $new_command;
-    1;
+}
+# Process routers...no routers listed is an error.
+if { $i == $argc } {
+    send_user "\nError: $usage"
 }
 
-sub numerically { $a <=> $b; }
+# Only be quiet if we are running a script (it can log its output
+# on its own)
+if { $do_script } {
+    log_user 0
+} else {
+    log_user 1
+}
 
-# This is a sort routine that will sort numerically on the
-# keys of a hash as if it were a normal array.
-sub keynsort {
-    local(%lines) = @_;
-    local($i) = 0;
-    local(@sorted_lines);
-    foreach $key (sort numerically keys(%lines)) {
-	$sorted_lines[$i] = $lines{$key};
-	$i++;
+#
+# Done configuration/variable setting.  Now run with it...
+#
+
+# Sets Xterm title if interactive...if its an xterm and the user cares
+proc label { host } {
+    global env
+    # if CLOGIN has an 'x' in it, don't set the xterm name/banner
+    if [info exists env(CLOGIN)] {
+	if {[string first "x" $env(CLOGIN)] != -1} { return }
     }
-    @sorted_lines;
-}
-
-# This is a sort routine that will sort on the
-# keys of a hash as if it were a normal array.
-sub keysort {
-    local(%lines) = @_;
-    local($i) = 0;
-    local(@sorted_lines);
-    foreach $key (sort keys(%lines)) {
-	$sorted_lines[$i] = $lines{$key};
-	$i++;
+    # take host from ENV(TERM)
+    if [info exists env(TERM)] {
+	if [ regexp \^(xterm|vs) $env(TERM) ignore ] {
+	    send_user "\033]1;[lindex [split $host "."] 0]\a"
+	    send_user "\033]2;$host\a"
+	}
     }
-    @sorted_lines;
 }
 
-# This is a sort routine that will sort on the
-# values of a hash as if it were a normal array.
-sub valsort{
-    local(%lines) = @_;
-    local($i) = 0;
-    local(@sorted_lines);
-    foreach $key (sort values %lines) {
-	$sorted_lines[$i] = $key;
-	$i++;
+# This is a helper function to make the password file easier to
+# maintain.  Using this the password file has the form:
+# add password sl*	pete cow
+# add password at*	steve
+# add password *	hanky-pie
+proc add {var args} { global int_$var ; lappend int_$var $args}
+proc include {args} {
+    global env
+    regsub -all "(^{|}$)" $args {} args
+    if { [ regexp "^/" $args ignore ] == 0 } {
+	set args $env(HOME)/$args
     }
-    @sorted_lines;
+    source_password_file $args
 }
 
-# This is a numerical sort routine (ascending).
-sub numsort {
-    local(%lines) = @_;
-    local($i) = 0;
-    local(@sorted_lines);
-    foreach $num (sort {$a <=> $b} keys %lines) {
-	$sorted_lines[$i] = $lines{$num};
-	$i++;
+proc find {var router} {
+    upvar int_$var list
+    if { [info exists list] } {
+	foreach line $list {
+	    if { [string match [lindex $line 0] $router ] } {
+		return [lrange $line 1 end]
+	    }
+	}
     }
-    @sorted_lines;
+    return {}
 }
 
-# This is a sort routine that will sort on the
-# ip address when the ip address is anywhere in
-# the strings.
-sub ipsort {
-    local(%lines) = @_;
-    local($i) = 0;
-    local(@sorted_lines);
-    foreach $addr (sort sortbyipaddr keys %lines) {
-	$sorted_lines[$i] = $lines{$addr};
-	$i++;
+# Loads the password file.  Note that as this file is tcl, and that
+# it is sourced, the user better know what to put in there, as it
+# could install more than just password info...  I will assume however,
+# that a "bad guy" could just as easy put such code in the clogin
+# script, so I will leave .cloginrc as just an extention of that script
+proc source_password_file { password_file } {
+    global env
+    if { ! [file exists $password_file] } {
+	send_user "\nError: password file ($password_file) does not exist\n"
+	exit 1
     }
-    @sorted_lines;
-}
-
-# These two routines will sort based upon IP addresses
-sub ipaddrval {
-    my(@a) = ($_[0] =~ m#^(\d+)\.(\d+)\.(\d+)\.(\d+)$#);
-    $a[3] + 256 * ($a[2] + 256 * ($a[1] +256 * $a[0]));
-}
-sub sortbyipaddr {
-    &ipaddrval($a) <=> &ipaddrval($b);
-}
-
-# This routine parses "show running-config"
-sub ShowConfig {
-print STDERR "    In ShowConfig: $_" if ($debug);
-    ProcessHistory("","","","\n!--WLC Begin Config Data--!\n\n");
-
-    $firstexit=0;
-
-
-    while (<INPUT>) {
-        tr/\015//d;
-        tr/\020//d;
-
-        $skipprocess=0;
-
-        #remove snmp community string data
-
-        if (/^(\s*snmp community create)/ && $filter_pwds >= 1) {
-            ProcessHistory("","","","!$1 <removed>\n"); next;
-        }
-        if (/^(\s*snmp community accessmode (ro|rw))/ && $filter_pwds >= 1) {
-            ProcessHistory("","","","!$1 <removed>\n"); next;
-        }
-        if (/^(\s*snmp community ipaddr\s\S+\s\S+) / && $filter_pwds >= 1) {
-            ProcessHistory("","","","!$1 <removed>\n"); next;
-        }
-
-        last if (/^$prompt/);
-        next if (/^(\s*|\s*$cmd\s*)$/);
-        if ( ! /^$prompt/) { 
-                if ( ! $skipprocess ) { 
-                        print STDOUT "      ShowConfig Data: $_" if ($debug);
-                        ProcessHistory("","","","$_");
-                }
-        }
+    file stat $password_file fileinfo
+    if { [expr ($fileinfo(mode) & 007)] != 0000 } {
+	send_user "\nError: $password_file must not be world readable/writable\n"
+	exit 1
     }
-    $clean_run=1;
-    ProcessHistory("","","","\n!--WLC End Config Data--!\n");
-    print STDERR "    Exiting ShowConfig: $_" if ($debug);
-    return(0);
+    if [ catch {source $password_file} reason ] {
+	send_user "\nError: $reason\n"
+	exit 1
+    }
 }
 
-# This routine parses "show sysinfo" 
-sub ShowSysinfo {
-    print STDERR "    In ShowSysinfo: $_" if ($debug);
-    ProcessHistory("","","","\n!WLC Show Sysinfo Start\n!\n"); 
+# Log into the router.
+# returns: 0 on success, 1 on failure, -1 if rsh was used successfully
+proc login { router user userpswd passwd cmethod cyphertype } {
+    global command spawn_id in_proc do_command do_script platform
+    global prompt u_prompt p_prompt e_prompt sshcmd
+    set in_proc 1
+    set uprompt_seen 0
 
-    while (<INPUT>) {
-	tr/\015//d;
-
-	$skipprocess=0;
-
-	if ( /^System Up Time/ ) { $skipprocess=1; }
-	if ( /^Number of Active Clients/ ) { $skipprocess=1; }
-	if ( /^Internal Temperature/ ) { $skipprocess=1; }
-
-	last if (/^$prompt/);
-	next if (/^(\s*|\s*$cmd\s*)$/);
-	if ( ! /^$prompt/) { 
-		if ( ! $skipprocess ) { 
-			print STDOUT "      ShowSysinfo Data: $_" if ($debug);
-			ProcessHistory("","","","! $_"); 
+    # try each of the connection methods in $cmethod until one is successful
+    set progs [llength $cmethod]
+    foreach prog [lrange $cmethod 0 end] {
+	incr progs -1
+	if [string match "telnet*" $prog] {
+	    regexp {telnet(:([^[:space:]]+))*} $prog methcmd suffix port
+	    if {"$port" == ""} {
+		set retval [ catch {spawn telnet $router} reason ]
+	    } else {
+		set retval [ catch {spawn telnet $router $port} reason ]
+	    }
+	    if { $retval } {
+		send_user "\nError: telnet failed: $reason\n"
+		return 1
+	    }
+	} elseif [string match "ssh*" $prog] {
+	    regexp {ssh(:([^[:space:]]+))*} $prog methcmd suffix port
+	    set cmd [join [lindex $sshcmd 0] " "]
+	    if {"$port" != ""} {
+		set cmd "$cmd -p $port"
+	    }
+	    set retval [ catch {eval spawn [split "$cmd -c $cyphertype -x -l $user $router" { }]} reason ]
+	    if { $retval } {
+		send_user "\nError: $sshcmd failed: $reason\n"
+		return 1
+	    }
+	} elseif ![string compare $prog "rsh"] {
+	    if { ! $do_command } {
+		if { [llength $cmethod] == 1 } {
+		    send_user "\nError: rsh is an invalid method for -x and "
+		    send_user "interactive logins\n"
 		}
+		if { $progs == 0 } {
+		    return 1
+		}
+		continue;
+	    }
+
+	    set commands [split $command \;]
+	    set num_commands [llength $commands]
+	    set rshfail 0
+	    for {set i 0} {$i < $num_commands && !$rshfail} { incr i} {
+		log_user 0
+		set retval [ catch {spawn rsh $user@$router [lindex $commands $i] } reason ]
+		if { $retval } {
+		    send_user "\nError: rsh failed: $reason\n"
+		    log_user 1; return 1
+		}
+		send_user "$router# [lindex $commands $i]\n"
+
+		# rcmd does not get a pager and no prompts, so we just have to
+		# look for failures & lines.
+		expect {
+		  "Connection refused"	{ catch {close}; catch {wait};
+					  send_user "\nError: Connection\
+						    Refused ($prog): $router\n"
+					  set rshfail 1
+					}
+		  -re "(Connection closed by|Connection to \[^\n\r]+ closed)" {
+					  catch {close}; catch {wait};
+					  send_user "\nError: Connection\
+						    closed ($prog): $router\n"
+					  set rshfail 1
+					}
+		  "Host is unreachable"	{ catch {close}; catch {wait};
+					  send_user "\nError: Host Unreachable:\
+						    $router\n"
+					  set rshfail 1
+					}
+		  "No address associated with" {
+					  catch {close}; catch {wait};
+					  send_user "\nError: Unknown host\
+						    $router\n"
+					  set rshfail 1
+					}
+		  -re "\b+"		{ exp_continue }
+		  -re "\[\n\r]+"	{ send_user -- "$expect_out(buffer)"
+					  exp_continue
+					}
+		  timeout		{ catch {close}; catch {wait};
+					  send_user "\nError: TIMEOUT reached\n"
+					  set rshfail 1
+					}
+		  eof			{ catch {close}; catch {wait}; }
+		}
+		log_user 1
+	    }
+	    if { $rshfail } {
+		if { !$progs } {
+		    return 1
+		} else {
+		    continue
+		}
+	    }
+	    # fake the end of the session for rancid.
+	    send_user "$router# exit\n"
+	    # return rsh "success"
+	    return -1
+	} else {
+	    send_user "\nError: unknown connection method: $prog\n"
+	    return 1
+	}
+	sleep 0.3
+
+	# This helps cleanup each expect clause.
+	expect_after {
+	    timeout {
+		send_user "\nError: TIMEOUT reached\n"
+		catch {close}; catch {wait};
+		if { $in_proc} {
+		    return 1
+		} else {
+		    continue
+		}
+	    } eof {
+		send_user "\nError: EOF received\n"
+		catch {close}; catch {wait};
+		if { $in_proc} {
+		    return 1
+		} else {
+		    continue
+		}
+	    }
+	}
+
+    # Here we get a little tricky.  There are several possibilities:
+    # the router can ask for a username and passwd and then
+    # talk to the TACACS server to authenticate you...
+    # Or, the router might not have TACACS turned on,
+    # then it will just send the passwd.
+    # if telnet fails with connection refused, try ssh
+    expect {
+	-re "(Connection refused|Secure connection \[^\n\r]+ refused)" {
+	    catch {close}; catch {wait};
+	    if !$progs {
+		send_user "\nError: Connection Refused ($prog): $router\n"
+		return 1
+	    }
+	}
+	-re "(Connection closed by|Connection to \[^\n\r]+ closed)" {
+	    catch {close}; catch {wait};
+	    if !$progs {
+		send_user "\nError: Connection closed ($prog): $router\n"
+		return 1
+	    }
+	}
+	eof { send_user "\nError: Couldn't login: $router\n"; wait; return 1 }
+	-nocase "unknown host\r" {
+	    send_user "\nError: Unknown host $router\n";
+	    catch {close}; catch {wait};
+	    return 1
+	}
+	"Host is unreachable" {
+	    send_user "\nError: Host Unreachable: $router\n";
+	    catch {close}; catch {wait};
+	    return 1
+	}
+	"No address associated with name" {
+	    send_user "\nError: Unknown host $router\n";
+	    catch {close}; catch {wait};
+	    return 1
+	}
+	-re "(Host key not found |The authenticity of host .* be established).*\(yes\/no\)\?" {
+	    send "yes\r"
+	    send_user "\nHost $router added to the list of known hosts.\n"
+	    exp_continue
+	}
+	-re "HOST IDENTIFICATION HAS CHANGED.* \(yes\/no\)\?" {
+	    send "no\r"
+	    send_user "\nError: The host key for $router has changed.  Update the SSH known_hosts file accordingly.\n"
+	    catch {close}; catch {wait};
+	    return 1
+	}
+	-re "Offending key for .* \(yes\/no\)\?" {
+	    send "no\r"
+	    send_user "\nError: host key mismatch for $router.  Update the SSH known_hosts file accordingly.\n"
+	    catch {close}; catch {wait};
+	    return 1
+	}
+	-re "(denied|Sorry)"	{
+				  send_user "\nError: Check your passwd for $router\n"
+				  catch {close}; catch {wait}; return 1
+				}
+	"Login failed"		{
+				  send_user "\nError: Check your passwd for $router\n"
+				  catch {close}; catch {wait}; return 1
+				}
+	-re "% (Bad passwords|Authentication failed)"	{
+				  send_user "\nError: Check your passwd for $router\n"
+				  catch {close}; catch {wait}; return 1
+				}
+	"Press any key to continue" {
+				  # send_user "Pressing the ANY key\n"
+				  send "\r"
+				  exp_continue
+				}
+	-re "Enter Selection: " {
+				  # Catalyst 1900s have some lame menu.  Enter
+				  # K to reach a command-line.
+				  send "K\r"
+				  exp_continue
+				}
+	-re "Last login:"	{
+				  exp_continue
+				}
+	-re "@\[^\r\n]+ $p_prompt"	{
+				  # ssh pwd prompt
+				  sleep 1
+				  send -- "$userpswd\r"
+				  exp_continue
+				}
+	-re "$u_prompt"		{
+				  send -- "$user\r"
+				  set uprompt_seen 1
+				  exp_continue
+				}
+	-re "$p_prompt"		{
+				  sleep 1
+				  if {$uprompt_seen == 1} {
+					send -- "$userpswd\r"
+				  } else {
+					send -- "$passwd\r"
+				  }
+				  exp_continue
+				}
+	-re "$prompt"		{ break; }
+	"Login invalid"		{
+				  send_user "\nError: Invalid login: $router\n";
+				  catch {close}; catch {wait}; return 1
+				}
+     }
+    }
+
+    set in_proc 0
+    return 0
+}
+
+# Run commands given on the command line.
+proc run_commands { prompt command } {
+    global do_saveconfig in_proc platform
+    set in_proc 1
+
+    send "config paging disable\r"
+    expect -re $prompt  {}
+
+    set reprompt $prompt
+
+    # this is the only way i see to get rid of more prompts in o/p..grrrrr
+    log_user 0
+
+    set commands [split $command \;]
+    set num_commands [llength $commands]
+    for {set i 0} {$i < $num_commands} { incr i} {
+	send -- "[subst -nocommands [lindex $commands $i]]\r"
+	expect {
+	    -re "\b+"				{ exp_continue }
+	    -re "^\[^\n\r *]*$reprompt"		{ send_user -- "$expect_out(buffer)"
+						}
+	    -re "^\[^\n\r]*$reprompt."		{ send_user -- "$expect_out(buffer)"
+						  exp_continue
+						}
+	    -re "^--More--\[\r\n]+"		{ # specific match c1900 pager
+						  send " "
+						  exp_continue
+						}
+	    -re "\[\n\r]+"			{ send_user -- "$expect_out(buffer)"
+						  exp_continue
+						}
 	}
     }
-    ProcessHistory("","","","!\n!WLC Show Sysinfo End\n"); 
-    print STDERR "    Exiting ShowSysinfo: $_" if ($debug);
-    return(0);
-}
+    log_user 1
 
-# This routine parses "show udi"
-sub ShowUdi {
- print STDERR "    In ShowUdi: $_" if ($debug);
-    ProcessHistory("","","","\n!WLC Show Udi Start\n!\n");
-
-    while (<INPUT>) {
-        tr/\015//d;
-
-        $skipprocess=0;
-
-        last if (/^$prompt/);
-        next if (/^(\s*|\s*$cmd\s*)$/);
-        if ( ! /^$prompt/) {
-                if ( ! $skipprocess ) {
-                        print STDOUT "      ShowUdi Data: $_" if ($debug);
-                        ProcessHistory("","","","! $_");
-                }
-        }
+    send -h "exit\r"
+    expect {
+	-re "^\[^\n\r *]*$reprompt"		{
+						  # the Cisco CE and Jnx ERX
+						  # return to non-enabled mode
+						  # on exit in enabled mode.
+						  send -h "exit\r"
+						  exp_continue;
+						}
+	"The system has unsaved changes"	{ # Force10 SFTOS
+						  if {$do_saveconfig} {
+						    catch {send "y\r"}
+						  } else {
+						    catch {send "n\r"}
+						  }
+						  exp_continue
+						}
+	"Would you like to save them now"	{ # Force10
+						  if {$do_saveconfig} {
+						    catch {send "y\r"}
+						  } else {
+						    catch {send "n\r"}
+						  }
+						  exp_continue
+						}
+	-re "(Profile|Configuration) changes have occurred.*"	{
+						  # Cisco CSS
+						  if {$do_saveconfig} {
+						    catch {send "y\r"}
+						  } else {
+						    catch {send "n\r"}
+						  }
+						  exp_continue
+						}
+	"Do you wish to save your configuration changes" {
+						  if {$do_saveconfig} {
+						    catch {send "y\r"}
+						  } else {
+						    catch {send "n\r"}
+						  }
+						  exp_continue
+						}
+	-re "\[\n\r]+"				{ exp_continue }
+	timeout					{ catch {close}; catch {wait};
+						  return 0
+						}
+	eof					{ return 0 }
     }
-    ProcessHistory("","","","!\n!WLC Show Udi End\n");
-    print STDERR "    Exiting ShowSysinfo: $_" if ($debug);
-    return(0);
-
+    set in_proc 0
 }
 
+#
+# For each router... (this is main loop)
+#
+source_password_file $password_file
+set in_proc 0
+set exitval 0
+foreach router [lrange $argv $i end] {
+    set router [string tolower $router]
+    # attempt at platform switching.
+    set platform ""
+    send_user -- "$router\n"
 
-# dummy function
-sub DoNothing {print STDOUT;}
+    # device timeout
+    set timeout [find timeout $router]
+    if { [llength $timeout] == 0 } {
+	set timeout $timeoutdflt
+    }
 
-# Main
-@commandtable = (
-	{'show udi'		=> 'ShowUdi'},
-	{'show sysinfo'		=> 'ShowSysinfo'},
-	{'show run-config commands'	=> 'ShowConfig'}
-);
-# Use an array to preserve the order of the commands and a hash for mapping
-# commands to the subroutine and track commands that have been completed.
-@commands = map(keys(%$_), @commandtable);
-%commands = map(%$_, @commandtable);
+    set prompt ">"
 
-$cisco_cmds = join(";", at commands);
-$cmds_regexp = join("|", map quotemeta($_), @commands);
-
-$file = "$host.new" unless $file;
-
-open(OUTPUT,">$file") || die "Can't open $file for writing: $!\n";
-select(OUTPUT);
-# make OUTPUT unbuffered if debugging
-if ($debug) { $| = 1; }
-
-if ($rawfile) {
-    print STDERR "opening file $rawfile\n" if ($debug);
-    print STDOUT "opening file $rawfile\n" if ($log);
-    open(INPUT,"<$rawfile") || die "open failed for $rawfile: $!\n";
-} else {
-    print STDERR "executing wlogin -t $timeo -c\"$cisco_cmds\" $host\n" if ($debug);
-    print STDOUT "executing wlogin -t $timeo -c\"$cisco_cmds\" $host\n" if ($log);
-    if (defined($ENV{NOPIPE})) {
-	$rawfile = "$host.raw";
-	system "wlogin -t $timeo -c \"$cisco_cmds\" $host </dev/null > $rawfile 2>&1" || die "wlogin failed for $host: $!\n";
-	open(INPUT, "< $rawfile") || die "wlogin failed for $host: $!\n";
+    # Figure out passwords
+    if { $do_passwd } {
+      set pswd [find password $router]
+      if { [llength $pswd] == 0 } {
+	send_user -- "\nError: no password for $router in $password_file.\n"
+	continue
+      }
+      set passwd [join [lindex $pswd 0] ""]
     } else {
-	open(INPUT,"wlogin -t $timeo -c \"$cisco_cmds\" $host </dev/null |") || die "wlogin failed for $host: $!\n";
+	set passwd $userpasswd
     }
-}
 
-
-# determine password filtering mode
-if ($ENV{"FILTER_PWDS"} =~ /no/i) {
-	$filter_pwds = 0;
-} elsif ($ENV{"FILTER_PWDS"} =~ /all/i) {
-	$filter_pwds = 2;
-} else {
-	$filter_pwds = 1;
-}
-
-
-ProcessHistory("","","","!RANCID-CONTENT-TYPE: ciscowlc\n!\n");
-TOP: while(<INPUT>) {
-    tr/\015//d;
-    if (/[>#]\s?exit$/) {
-	$clean_run = 1;
-	last;
+    # Figure out username
+    if {[info exists username]} {
+      # command line username
+      set ruser $username
+    } else {
+      set ruser [join [find user $router] ""]
+      if { "$ruser" == "" } { set ruser $default_user }
     }
-    if (/^Error:/) {
-	print STDOUT ("$host wlogin error: $_");
-	print STDERR ("$host wlogin error: $_") if ($debug);
-	$clean_run = 0;
-	last;
+
+    # Figure out username's password (if different from the vty password)
+    if {[info exists userpasswd]} {
+      # command line username
+      set userpswd $userpasswd
+    } else {
+      set userpswd [join [find userpassword $router] ""]
+      if { "$userpswd" == "" } { set userpswd $passwd }
     }
-    while (/>\s*($cmds_regexp)\s*$/) {
-	$cmd = $1;
-	if (!defined($prompt)) {
-            $prompt = ($_ =~ /^([^#]+>)/)[0];
-            $prompt =~ s/([][}{)(\\])/\\$1/g;
-            print STDERR ("PROMPT MATCH: $prompt\n") if ($debug);
+
+    # Figure out prompts
+    set u_prompt [find userprompt $router]
+    if { "$u_prompt" == "" } {
+	set u_prompt "(Username|Login|login|user name|User):"
+    } else {
+	set u_prompt [join [lindex $u_prompt 0] ""]
+    }
+    set p_prompt [find passprompt $router]
+    if { "$p_prompt" == "" } {
+	set p_prompt "(\[Pp]assword|passwd):"
+    } else {
+	set p_prompt [join [lindex $p_prompt 0] ""]
+    }
+
+    # Figure out cypher type
+    if {[info exists cypher]} {
+        # command line cypher type
+        set cyphertype $cypher
+    } else {
+        set cyphertype [find cyphertype $router]
+        if { "$cyphertype" == "" } { set cyphertype "3des" }
+    }
+
+    # Figure out connection method
+    set cmethod [find method $router]
+    if { "$cmethod" == "" } { set cmethod {{telnet} {ssh}} }
+
+    # Figure out the SSH executable name
+    set sshcmd [find sshcmd $router]
+    if { "$sshcmd" == "" } { set sshcmd {ssh} }
+
+    # Login to the router
+    if {[login $router $ruser $userpswd $passwd $cmethod $cyphertype]} {
+	incr exitval
+	# if login failed or rsh was unsuccessful, move on to the next device
+	continue
+    }
+    
+    # we are logged in, now figure out the full prompt
+    send "\r"
+    expect {
+	-re "\[\r\n]+"		{ exp_continue; }
+	-re "^.+$prompt"	{ set junk $expect_out(0,string);
+				  regsub -all "\[\]\[\(\)]" $junk {\\&} prompt;
+				}
+    }
+
+    if { $do_command } {
+	if {[run_commands $prompt $command]} {
+	    incr exitval
+	    continue
 	}
-	print STDERR ("WLC COMMAND:$_") if ($debug);
-	if (! defined($commands{$cmd})) {
-	    print STDERR "$host: found unexpected command - \"$cmd\"\n";
-	    $clean_run = 0;
-	    last TOP;
-	}
-	$rval = &{$commands{$cmd}};
-	delete($commands{$cmd});
-	if ($rval == -1) {
-	    $clean_run = 0;
-	    last TOP;
-	}
+    } elseif { $do_script } {
+        send "config paging disable\r"
+	expect -re $prompt  {}
+	source $sfile
+	catch {close};
+    } else {
+	label $router
+	log_user 1
+	interact
     }
-}
-print STDOUT "Done $logincmd: $_\n" if ($log);
-# Flush History
-ProcessHistory("","","","");
-# Cleanup
-close(INPUT);
-close(OUTPUT);
 
-if (defined($ENV{NOPIPE})) {
-    unlink($rawfile) if (! $debug);
+    # End of for each router
+    catch {wait};
+    sleep 0.3
 }
-
-# check for completeness
-if (scalar(%commands) || !$clean_run ) {
-    if (scalar(%commands)) {
-	printf(STDOUT "$host: missed cmd(s): %s\n", join(',', keys(%commands)));
-	printf(STDERR "$host: missed cmd(s): %s\n", join(',', keys(%commands))) if ($debug);
-    }
-    if (!$clean_run ) {
-	print STDOUT "$host: End of run not found\n";
-	print STDERR "$host: End of run not found\n" if ($debug);
-	system("/usr/bin/tail -1 $file");
-    }
-    unlink "$host.new" if (! $debug);
-}
+exit $exitval
