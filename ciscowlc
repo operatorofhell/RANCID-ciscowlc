@@ -43,7 +43,7 @@ my(%filter_pwds);			# password filtering mode
 # This routine is used to print out the router configuration
 sub ProcessHistory {
 
-    my($new_hist_tag,$new_command,$command_string, at string) = (@_);
+    my($new_hist_tag,$new_command,$command_string, @string) = (@_);
     if ((($new_hist_tag ne $hist_tag) || ($new_command ne $command))
 	&& defined %history) {
 	print eval "$command \%history";
@@ -250,7 +250,7 @@ sub DoNothing {print STDOUT;}
 @commands = map(keys(%$_), @commandtable);
 %commands = map(%$_, @commandtable);
 
-$cisco_cmds = join(";", at commands);
+$cisco_cmds = join(";", @commands);
 $cmds_regexp = join("|", map quotemeta($_), @commands);
 
 $file = "$host.new" unless $file;
