@@ -1,4 +1,3 @@
-
 #! /usr/bin/expect --
 ##
 ## $Id: clogin.in 2162 2010-03-15 21:20:31Z heas $
@@ -552,6 +551,10 @@ proc run_commands { prompt command } {
 						  send " "
 						  exp_continue
 						}
+	    -re "^--More-- +"			{ #WLC
+						send " "
+						exp_continue
+						}	
 	    -re "\[\n\r]+"			{ send_user -- "$expect_out(buffer)"
 						  exp_continue
 						}
@@ -566,6 +569,10 @@ proc run_commands { prompt command } {
 						  # return to non-enabled mode
 						  # on exit in enabled mode.
 						  send -h "exit\r"
+						  exp_continue;
+						}
+	"Incorrect usage.  Use the "		{ # the WLC does not undrestand exit
+						  send -h "logout\r"
 						  exp_continue;
 						}
 	"The system has unsaved changes"	{ # Force10 SFTOS
