@@ -551,7 +551,7 @@ proc run_commands { prompt command } {
 						  send " "
 						  exp_continue
 						}
-	    -re "^--More-- +"			{ #WLC
+	    -re "^--More-- .+$"			{ #WLC
 						send " "
 						exp_continue
 						}	
