@@ -551,10 +551,16 @@ proc run_commands { prompt command } {
 						  send " "
 						  exp_continue
 						}
-	    -re "^--More-- .+$"			{ #WLC
-						send " "
-						exp_continue
-						}	
+
+	    -re "^--More-- or \(q)\uit.*"		{ # specific WLC pager string
+						  send " "
+						  exp_continue
+						}
+
+	    -re "^--More-- or.*"		{ # specific WLC pager string
+						  send " "
+						  exp_continue
+						}
 	    -re "\[\n\r]+"			{ send_user -- "$expect_out(buffer)"
 						  exp_continue
 						}
@@ -562,17 +568,13 @@ proc run_commands { prompt command } {
     }
     log_user 1
 
-    send -h "exit\r"
+    send -h "logout\r"
     expect {
 	-re "^\[^\n\r *]*$reprompt"		{
 						  # the Cisco CE and Jnx ERX
 						  # return to non-enabled mode
 						  # on exit in enabled mode.
 						  send -h "exit\r"
-						  exp_continue;
-						}
-	"Incorrect usage.  Use the "		{ # the WLC does not undrestand exit
-						  send -h "logout\r"
 						  exp_continue;
 						}
 	"The system has unsaved changes"	{ # Force10 SFTOS
