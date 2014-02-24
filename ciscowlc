@@ -195,7 +195,7 @@ sub ShowSysinfo {
 	if ( /^System Up Time/ ) { $skipprocess=1; }
 	if ( /^Number of Active Clients/ ) { $skipprocess=1; }
 	if ( /^Internal Temperature/ ) { $skipprocess=1; }
-
+	if ( /^External Temperature/ ) { $skipprocess=1; }
 	last if (/^$prompt/);
 	next if (/^(\s*|\s*$cmd\s*)$/);
 	if ( ! /^$prompt/) { 
