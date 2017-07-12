@@ -235,6 +235,32 @@ sub ShowUdi {
 
 }
 
+sub ShowSfp {
+ print STDERR "    In ShowSfp: $_" if ($debug);
+    ProcessHistory("","","","\n!WLC Show Sfp Start\n!\n");
+
+    while (<INPUT>){
+	tr/\015//d;
+
+        $skipprocess=0;
+
+	last if (/^FP0/);
+	next if (/FP0.$/);
+	last if (/^$prompt/);
+        next if (/^(\s*|\s*$cmd\s*)$/);
+        if ( ! /^$prompt/) {
+                if ( ! $skipprocess ) {
+                        print STDOUT "      ShowSfp Data: $_" if ($debug);
+                        ProcessHistory("","","","! $_");
+                }
+        }
+	
+    }
+    ProcessHistory("","","","!\n!WLC Show Sfp End\n");
+ print STDERR "    Exiting ShowSfp: $_" if ($debug);
+ return(0);
+}
+
 
 # dummy function
 sub DoNothing {print STDOUT;}
@@ -243,7 +269,8 @@ sub DoNothing {print STDOUT;}
 @commandtable = (
 	{'show udi'		=> 'ShowUdi'},
 	{'show sysinfo'		=> 'ShowSysinfo'},
-	{'show run-config commands'	=> 'ShowConfig'}
+	{'show run-config commands'	=> 'ShowConfig'},
+	{'debug fastpath cfgtool --dump.sfp' => 'ShowSfp'}
 );
 # Use an array to preserve the order of the commands and a hash for mapping
 # commands to the subroutine and track commands that have been completed.
